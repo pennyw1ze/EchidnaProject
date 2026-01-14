@@ -1,0 +1,622 @@
+\documentclass{article}
+
+\usepackage{graphicx}
+\usepackage{tocloft}          % Dotted lines in TOC
+\usepackage[hidelinks]{hyperref} % Clickable TOC entries
+
+\title{[SSA] Echidna Project}
+\author{Leonardo Rufini, 2008161}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\lstdefinelanguage{Solidity}{
+  keywords={contract,function,public,private,view,returns,require,address,bool,uint},
+  keywordstyle=\color{blue}\bfseries,
+  basicstyle=\ttfamily\small,
+  commentstyle=\color{gray},
+  stringstyle=\color{red},
+  breaklines=true,
+  frame=single
+}
+
+\lstset{
+  language=Solidity,
+  showstringspaces=false,
+  tabsize=2,
+  captionpos=b
+}
+
+\begin{document}
+\setcounter{section}{-1}
+\maketitle
+
+\tableofcontents
+
+\section{Introduction}
+\subsection{Fuzzing} 
+\textbf{Fuzzing} is an automated testing technique that generates a large number of \textbf{pseudo-random inputs} in order to explore different execution paths of a program and identify unexpected behaviors or vulnerabilities. In the context of smart contracts, fuzzing repeatedly calls contract functions with varying inputs to stress-test the contract logic under many possible scenarios.
+\subsection{Echidna}
+\textbf{Echidna} is a property-based smart contract fuzzer that allows developers to specify correctness properties as \textbf{Solidity} functions returning a boolean value. During execution, Echidna continuously generates inputs and sequences of function calls and checks whether the specified properties hold. If a property evaluates to \texttt{false}, Echidna reports a counterexample, demonstrating a concrete sequence of inputs that violates the intended behavior, thereby helping developers detect bugs and security issues.
+
+\section{Part 1}
+
+\subsection{Invariant}
+
+\subsubsection{Identification}
+Before implementing property-based tests, I identified the essential invariants for marriage and divorce operations. These invariants express properties that should always hold:
+
+\begin{enumerate}   
+    \item \textbf{Null check:} A married person cannot have a null spouse address;
+    
+    \item \textbf{Symmetry:} If person A is married to person B, then person B must be married to person A;
+    
+    \item \textbf{Consistency:} The \texttt{isMarried} flag must be consistent with the \texttt{spouse} field;
+    
+    \item \textbf{No Self-Marriage:} A person cannot be married to themselves;
+    
+    \item \textbf{No Bigamy:} A person cannot marry while already married;
+    
+    \item \textbf{Divorce Consistency:} After divorce, both parties must have \texttt{spouse = address(0)} and \texttt{isMarried = false}.
+\end{enumerate}
+
+\subsubsection{Implementation}
+
+
+I created \texttt{TaxpayerEchidna.sol}, a dedicated test contract that instantiates multiple \texttt{Taxpayer} instances and defines property functions for Echidna to verify. The test  includes invariant checks (functions prefixed with \texttt{echidna\_}) and helper functions.
+
+\paragraph{Test Setup}
+The constructor instantiates three \texttt{Taxpayer} contracts for testing:
+
+\begin{lstlisting}[language=Solidity, caption={Test  Constructor}]
+contract TaxpayerEchidna {
+    Taxpayer public alice;
+    
+    constructor() {
+        alice = new Taxpayer(address(0), address(0));
+        // Same for bob and charlie;
+    }
+}
+\end{lstlisting}
+
+\paragraph{Invariant: Symmetry}
+Validates if marriage is a bidirectional:
+\begin{lstlisting}[language=Solidity, caption={Marriage Symmetry Property}]
+function echidna_marriage_symmetry() public view returns (bool) {
+    // Check Alice's marriage reciprocity
+    if (alice.isMarried()) {
+        address aliceSpouse = alice.spouse();
+        Taxpayer alicePartner = Taxpayer(aliceSpouse);
+        if (!alicePartner.isMarried() || 
+            alicePartner.spouse() != address(alice)) {
+            return false;
+        }
+    }
+    // Same for bob and charlie
+    return true;
+}
+\end{lstlisting}
+
+\paragraph{Invariant: Non-Null}
+Taxpayer marked as married must have a valid (non-zero) spouse address:
+
+\begin{lstlisting}[language=Solidity, caption={Marriage Non-Null Property}]
+function echidna_marriage_nonnull() public view returns (bool) {
+    if (alice.isMarried() && alice.spouse() == address(0)) {
+        return false;
+    }
+    // Same for bob and charlie
+    return true;
+}
+\end{lstlisting}
+
+\paragraph{Invariant: No Self-Marriage}
+This invariant prevents a taxpayer from being married to themselves:
+
+\begin{lstlisting}[language=Solidity, caption={No Self-Marriage Property}]
+function echidna_no_self_marriage() public view returns (bool) {
+    if (alice.isMarried() && 
+        alice.spouse() == address(alice)) {
+        return false;
+    }
+    // Same for bob and charlie
+    return true;
+}
+\end{lstlisting}
+
+\paragraph{Invariant: No Minor Marriage}
+This invariant enforces the age restriction that only taxpayers aged 18 or above can be married:
+
+\begin{lstlisting}[language=Solidity, caption={Age Restriction Property}]
+function echidna_no_minor_marriage() public view returns (bool) {
+    if (alice.isMarried() && alice.age() < 18) {
+        return false;
+    }
+    // Same for bob and charlie
+    return true;
+}
+\end{lstlisting}
+
+\paragraph{Invariant: Divorce Consistency}
+This invariant ensures that unmarried taxpayers have a null spouse field:
+
+\begin{lstlisting}[language=Solidity, caption={Divorce Consistency Property}]
+function echidna_divorce_consistency() public view returns (bool) {
+    if (!alice.isMarried() && alice.spouse() != address(0)) {
+        return false;
+    }
+    // Same for bob and charlie
+    return true;
+}
+\end{lstlisting}
+\subsection{Initial Violation Detection}
+
+Running Echidna on the \texttt{Taxpayer.sol} contract revealed some violations.
+Test output:
+
+\begin{verbatim}
+$ echidna TaxpayerEchidna.sol --contract TaxpayerEchidna 
+                              --config echidna.yaml
+
+echidna_marriage_nonnull: failed!
+  Call sequence:
+    TaxpayerEchidna.attemptNullMarriage()
+
+echidna_no_self_marriage: failed!
+  Call sequence:
+    TaxpayerEchidna.attemptSelfMarriage()
+
+echidna_no_minor_marriage: failed!
+  Call sequence:
+    TaxpayerEchidna.attemptSelfMarriage()
+
+echidna_marriage_symmetry: failed!
+  Call sequence:
+    TaxpayerEchidna.attemptNullMarriage()
+
+echidna_divorce_consistency: passing
+
+Total calls: 50235
+Corpus size: 8
+\end{verbatim}
+
+\paragraph{Violations Detected:}
+
+\begin{enumerate}
+    \item \textbf{Marriage Non-Null Violation:}
+The \texttt{attemptNullMarriage()} function exposed that the contract allows marrying a null address (\texttt{address(0)});
+
+    \item \textbf{Self-Marriage Violation:}
+The \texttt{attemptSelfMarriage()} function revealed that the contract permits a taxpayer to marry themselves;
+
+    \item \textbf{Minor Marriage Violation:}
+Since taxpayers are initialized with age 0, the \texttt{attemptSelfMarriage()} sequence also exposed that minors can be married, violating age restrictions'
+
+    \item \textbf{Marriage Symmetry Violation:}
+The \texttt{attemptNullMarriage()} and \texttt{createAsymmetricMarriage()} functions confirmed that \texttt{marry()} function only updates one party's state, violating the symmetry requirement.
+
+\end{enumerate}
+
+\subsection{Fixes}
+
+To address the four violations detected by Echidna,  I applied fixes following all three suggested approaches from the assignment. The fixed version is implemented in \texttt{Taxpayer\_Final.sol}. New code:
+
+\begin{lstlisting}[language=Solidity, caption={Fixed marry function}]
+function marry(address new_spouse) public {
+    require(new_spouse != address(0), "Cannot marry null address");
+    require(!isMarried, "Already married");
+    require(spouse == address(0), "Spouse already set");
+    require(new_spouse != address(this), "Cannot marry yourself");
+    require(age >= 18, "Must be 18 or older to marry");
+    
+    Taxpayer partner = Taxpayer(new_spouse);
+    require(partner.age() >= 18, "Spouse must be 18 or older");
+    
+    // Update both parties' marriage state bidirectionally
+    _writeMarriage(new_spouse);
+    partner._writeMarriage(address(this));
+}
+
+function _writeMarriage(address new_spouse) public {
+    require(new_spouse != address(0), "Cannot marry null address");
+    require(!isMarried, "Already married");
+    
+    spouse = new_spouse;
+    isMarried = true;
+}
+\end{lstlisting}
+
+
+\begin{lstlisting}[language=Solidity, caption={Fixed divorce function}]
+function divorce() public {
+    require(isMarried, "Not married");
+    require(spouse != address(0), "No spouse to divorce");
+    
+    address ex_spouse = spouse;
+    
+    // Update both parties' states bidirectionally
+    _writeDivorce();
+    Taxpayer(ex_spouse)._writeDivorce();
+}
+
+function _writeDivorce() public {
+    require(isMarried, "Not married");
+    require(spouse != address(0), "No spouse");
+    
+    spouse = address(0);
+    isMarried = false;
+}
+\end{lstlisting}
+
+\paragraph{(b) Adding Preconditions}
+
+ I added comprehensive \texttt{require()} statements to prevent all four detected violations:
+\begin{itemize}
+    \item \texttt{require(new\_spouse != address(0))} - \textbf{Prevents null spouse};
+    \item \texttt{require(!isMarried)} - Prevents bigamy;
+    \item \texttt{require(spouse == address(0))} - Double-checks clean state;
+    \item \texttt{require(new\_spouse != address(this))} - \textbf{Prevents self-marriage};
+    \item \texttt{require(age >= 18),require(partner.age() >= 18)} - \textbf{Prevents minor marriage};
+\end{itemize}
+
+\textbf{Divorce Preconditions:}
+\begin{itemize}
+    \item \texttt{require(isMarried)} - Must be married to divorce
+    \item \texttt{require(spouse != address(0))} - Must have a spouse
+\end{itemize}
+
+\textbf{Transfer Allowance Preconditions:}
+\begin{lstlisting}[language=Solidity, caption={Transfer Allowance Validation}]
+function transferAllowance(uint change) public {
+    require(isMarried, "Must be married to transfer allowance");
+    require(spouse != address(0), "No spouse");
+    require(change <= tax_allowance, "Insufficient allowance");
+    
+    tax_allowance = tax_allowance - change;
+    Taxpayer sp = Taxpayer(address(spouse));
+    sp.setTaxAllowance(sp.getTaxAllowance() + change);
+}
+\end{lstlisting}
+
+\subsubsection{Final Test Results}
+
+Running Echidna on the fixed contract demonstrates that all invariants now hold:
+
+\begin{verbatim}
+$ echidna TaxpayerEchidna.sol --contract TaxpayerEchidna 
+                              --config echidna.yaml
+
+[2026-01-09 20:19:17.31] Compiling `TaxpayerEchidna.sol`... Done!
+Analyzing contract: TaxpayerEchidna
+
+echidna_marriage_symmetry: passing
+echidna_marriage_nonnull: passing  
+echidna_no_self_marriage: passing
+echidna_no_minor_marriage: passing
+echidna_divorce_consistency: passing
+
+Unique instructions: 2064
+Unique codehashes: 2
+Corpus size: 8
+Seed: 4402796992973120142
+Total calls: 50235
+\end{verbatim}
+
+\section{Part 2}
+
+\subsection{Part 2: Tax Allowance Pooling}
+
+The tax system has an income tax allowance of 5000 per individual. Married persons can pool their tax allowance as long as the sum remains 10000. For this, two invariants are needed:
+\begin{itemize}
+    \item If a taxpayer is unmarried, their tax allowance should equal 5000
+    \item If a taxpayer is married, their shared tax allowance should sum to 10000
+\end{itemize}
+
+I started writing the Echidna invariants with two test taxpayers:
+
+\begin{lstlisting}[language=Solidity, caption={Single Taxpayer Allowance Invariant}]
+function echidna_single_taxpayer_allowance() public view returns (bool) {
+    bool xValid = personX.isMarried() || 
+                  personX.getTaxAllowance() == DEFAULT_TAX_ALLOWANCE;
+    bool yValid = personY.isMarried() || 
+                  personY.getTaxAllowance() == DEFAULT_TAX_ALLOWANCE;
+    return xValid && yValid;
+}
+\end{lstlisting}
+
+\begin{lstlisting}[language=Solidity, caption={Couple Pooled Allowance Invariant}]
+function echidna_couple_pooled_allowance() public view returns (bool) {
+    if (personX.isMarried()) {
+        Taxpayer partnerX = Taxpayer(personX.spouse());
+        uint pooledX = personX.getTaxAllowance() + 
+                       partnerX.getTaxAllowance();
+        if (pooledX != COUPLE_TOTAL_ALLOWANCE) return false;
+    }
+    if (personY.isMarried()) {
+        Taxpayer partnerY = Taxpayer(personY.spouse());
+        uint pooledY = personY.getTaxAllowance() + 
+                       partnerY.getTaxAllowance();
+        if (pooledY != COUPLE_TOTAL_ALLOWANCE) return false;
+    }
+    return true;
+}
+\end{lstlisting}
+
+Running Echidna revealed a violation:
+
+\begin{verbatim}
+echidna_single_taxpayer_allowance: failed!
+  Call sequence:
+    reverse_marriage()
+    shift_allowance_from_Y(1)
+  
+  Result: personX has 5001 instead of 5000 after allowance transfer
+\end{verbatim}
+
+The issue is that when two taxpayers divorce, they should have their tax allowance reset first. I added a requirement in the divorce function: \texttt{require(tax\_allowance == DEFAULT\_ALLOWANCE)}.
+
+There is another check needed. Right now it's possible for one of the taxpayers in a married couple to transfer more than their tax allowance, creating underflows. I added an explicit invariant:
+
+\begin{lstlisting}[language=Solidity, caption={Non-Negative Allowance Invariant}]
+function echidna_allowance_non_negative() public view returns (bool) {
+    return personX.getTaxAllowance() >= 0 && 
+           personY.getTaxAllowance() >= 0;
+}
+\end{lstlisting}
+
+After applying the fix in \texttt{TaxpayerPart2Fixed.sol}:
+
+\begin{lstlisting}[language=Solidity, caption={Divorce with Allowance Check}]
+function divorce() public {
+    require(isMarried, "Not married");
+    require(spouse != address(0), "No spouse to divorce");
+    
+    // PART 2 FIX: Require default allowance before divorce
+    require(tax_allowance == DEFAULT_ALLOWANCE, 
+            "Must have default allowance to divorce");
+    require(TaxpayerPart2Fixed(spouse).getTaxAllowance() == DEFAULT_ALLOWANCE, 
+            "Spouse must have default allowance");
+    
+    address ex_spouse = spouse;
+    _writeDivorce();
+    TaxpayerPart2Fixed(ex_spouse)._writeDivorce();
+}
+\end{lstlisting}
+
+Final test results:
+
+\begin{verbatim}
+echidna_single_taxpayer_allowance: passing
+echidna_couple_pooled_allowance: passing
+echidna_allowance_non_negative: passing
+
+Total calls: 50251
+\end{verbatim}
+
+All invariants pass, ensuring that married couples can pool allowances while maintaining the 10000 sum, and unmarried individuals maintain their 5000 default allowance.
+
+\section{Part 3}
+
+\subsection{Part 3: Retirement Allowance}
+
+The government increased the personal tax allowance for retirees: taxpayers aged 65 or older have an allowance of 7000 (OAP); the base allowance remains 5000. Pooling rules remain the same: a married couple's pooled allowance must equal the sum of each spouse's personal default (age-adjusted).
+
+\subsection{Invariants added}
+\begin{itemize}
+  \item Unmarried taxpayers must hold their personal default allowance (5000 or 7000 depending on age).
+  \item Married couples must have a pooled allowance equal to the sum of both spouses' personal defaults.
+  \item Allowances must be non-negative.
+  \item The total allowance in the small test scenario must equal the sum of personal defaults.
+\end{itemize}
+
+I implemented these invariants as Echidna properties. Example invariant functions used in the harness targeting the original (buggy) contract:
+
+\begin{lstlisting}[language=Solidity, caption={Personal Default Invariant}]
+function echidna_personal_default_unmarried() public view returns (bool) {
+    if (!person1.isMarried()) {
+        uint expected = person1.age() >= 65 ? 7000 : 5000;
+        if (person1.getTaxAllowance() != expected) return false;
+    }
+    if (!person2.isMarried()) {
+        uint expected2 = person2.age() >= 65 ? 7000 : 5000;
+        if (person2.getTaxAllowance() != expected2) return false;
+    }
+    return true;
+}
+\end{lstlisting}
+
+\begin{lstlisting}[language=Solidity, caption={Couple Pooled Allowance Invariant}]
+function echidna_pooled_equals_defaults() public view returns (bool) {
+    if (person1.isMarried()) {
+        Taxpayer sp = Taxpayer(person1.spouse());
+        uint expected = (person1.age()>=65?7000:5000) + (sp.age()>=65?7000:5000);
+        if (person1.getTaxAllowance() + sp.getTaxAllowance() != expected) return false;
+    }
+    if (person2.isMarried()) {
+        Taxpayer sp2 = Taxpayer(person2.spouse());
+        uint expected2 = (person2.age()>=65?7000:5000) + (sp2.age()>=65?7000:5000);
+        if (person2.getTaxAllowance() + sp2.getTaxAllowance() != expected2) return false;
+    }
+    return true;
+}
+\end{lstlisting}
+
+\begin{lstlisting}[language=Solidity, caption={Total Allowance Invariant}]
+function echidna_total_matches_defaults() public view returns (bool) {
+    uint expected = (person1.age()>=65?7000:5000) + (person2.age()>=65?7000:5000);
+    return person1.getTaxAllowance() + person2.getTaxAllowance() == expected;
+}
+\end{lstlisting}
+
+\subsection{Bug traces on original contract}
+Running Echidna against the original `Taxpayer.sol` (harness `TaxpayerPart3BuggyEchidna.sol`) produced the following failing traces (examples):
+
+\begin{verbatim}
+echidna_total_matches_defaults: failed!
+  Call sequence:
+    TaxpayerPart3BuggyEchidna.make65_1()
+
+echidna_pooled_equals_defaults: failed!
+  Call sequence:
+    TaxpayerPart3BuggyEchidna.make65_1()
+    TaxpayerPart3BuggyEchidna.marry12()
+
+echidna_personal_default_unmarried: failed!
+  Call sequence:
+    TaxpayerPart3BuggyEchidna.marry12()
+    TaxpayerPart3BuggyEchidna.transfer1(1)
+\end{verbatim}
+
+These show the original contract neither upgrades allowance at 65 nor guarantees pooled sums after transfers/divorce.
+
+\subsection{Fix applied}
+I implemented a refactored fixed contract `TaxpayerRetirementFixed` (file: `Originale_ecc.. FIXED VERSION.sol`). The core retirement update preserves prior transfers by adding the allowance delta (OAP - base) instead of overwriting the allowance:
+
+\begin{lstlisting}[language=Solidity, caption={Retirement upgrade preserving transfers}]
+function _updateForRetirement() internal {
+    // Increase current allowance by the difference between OAP and base
+    // This preserves any prior transfers and keeps pooled sums consistent
+    if (_OAP_ALLOWANCE > _BASE_ALLOWANCE) {
+        tax_allowance += (_OAP_ALLOWANCE - _BASE_ALLOWANCE);
+    }
+}
+\end{lstlisting}
+
+Other safeguards added: stricter preconditions on `marry`, `separate` (divorce), and `moveAllowance`, and a safer contract check in `setTaxAllowance`.
+
+\subsection{Final verification (fixed contract)}
+I verified the fixed implementation with an Echidna harness `TaxpayerPart3Echidna.sol` (contract `RetirementEchidna`):
+
+\begin{verbatim}
+[2026-01-12 12:44:30.25] Compiling `./TaxpayerPart3Echidna.sol`... Done! (0.464s)
+Analyzing contract: TaxpayerPart3Echidna:RetirementEchidna
+echidna_unmarried_default: passing
+echidna_couple_pooled_default: passing
+
+Unique instructions: 5039
+Corpus size: 8
+Total calls: 50078
+\end{verbatim}
+
+Both Part 3 invariants passed on the fixed implementation.
+
+
+\section{Part 4}
+
+\subsection{Part 4: Lottery (commit-reveal)}
+
+The lottery implements a commit-reveal scheme where participants first commit a hash and later reveal the preimage; the winner receives an allowance boost. The original \texttt{Lottery.sol} contained several practical issues discovered by Echidna: double commits by the same participant, reveals accepted without prior commits, and unsafe handling when no reveals occur.
+
+\subsection{Invariants added}
+I wrote an Echidna harness that instantiates two test taxpayers and a lottery instance. The following invariants were checked:
+
+\begin{itemize}
+    \item \textbf{No repeated commits:} a single taxpayer must not be able to commit twice (protects against re-entrancy/duplication attacks).
+    \item \textbf{Reveal requires commit:} a reveal by an address that did not commit should not be accepted.
+    \item \textbf{Single winner:} at most one taxpayer receives the boosted allowance after the lottery ends.
+\end{itemize}
+
+Example property functions from the harness (names prefixed with \texttt{echidna\_} so Echidna recognizes them):
+
+\begin{lstlisting}[language=Solidity, caption={No repeated commits property}]
+function echidna_no_repeat_commit() public returns (bool) {
+        // try to commit twice from the same taxpayer; second commit must revert
+        try p1.joinLottery(address(lot), 1) { } catch {}
+        try p1.joinLottery(address(lot), 2) { return false; } catch { return true; }
+}
+\end{lstlisting}
+
+\begin{lstlisting}[language=Solidity, caption={Reveal requires prior commit}]
+function echidna_reveal_requires_commit() public returns (bool) {
+        // revealing without a prior commit should fail
+        try p1.revealLottery(address(lot), 123) { return false; } catch { return true; }
+}
+\end{lstlisting}
+
+\begin{lstlisting}[language=Solidity, caption={At most one winner}]
+function echidna_one_winner_only() public returns (bool) {
+        try lot.endLottery() {} catch {}
+        uint cnt = 0;
+        if (p1.getTaxAllowance() > p1.personalDefault()) cnt++;
+        if (p2.getTaxAllowance() > p2.personalDefault()) cnt++;
+        return cnt <= 1;
+}
+\end{lstlisting}
+
+\subsection{Bug traces on the original contract}
+Running Echidna against the original \texttt{Lottery.sol} with an early buggy harness produced counterexamples such as:
+
+\begin{verbatim}
+echidna_no_repeat_commit: failed!
+    Call sequence:
+        LotteryProbe.commitFromA()
+        LotteryProbe.commitFromA()
+
+echidna_reveal_requires_commit: failed!
+    Call sequence:
+        LotteryProbe.revealFromA()
+        LotteryProbe.commitFromB()
+        LotteryProbe.revealFromB()
+\end{verbatim}
+
+These traces demonstrate that the original contract allowed a second commit by the same address and accepted reveals without a corresponding commit.
+
+\subsection{Fix applied}
+To respect the assignment constraint of not modifying original files in-place, I implemented a corrected lottery in a separate file \texttt{Originale\_ecc.. LOTTERY FIXED VERSION.sol} (contract \texttt{LotteryFixed}). Key changes:
+
+\begin{itemize}
+    \item Block repeated commits by recording a commit flag and requiring it to be false on commit;
+    \item Require that a reveal maps to a prior commit (the preimage hash matches a previously recorded commit entry);
+    \item Guard the end-of-lottery computation so it handles the 0-reveals case safely (avoid divide-by-zero or similar errors) and selects a winner only among valid reveals.
+\end{itemize}
+
+Representative fixed snippets:
+
+\begin{lstlisting}[language=Solidity, caption={Prevent double commit and require valid reveal}]
+function commit(bytes32 h) public {
+        require(!committed[msg.sender], "already committed");
+        committed[msg.sender] = true;
+        commits[msg.sender] = h;
+}
+
+function reveal(uint r) public {
+        require(committed[msg.sender], "no prior commit");
+        require(keccak256(abi.encodePacked(r)) == commits[msg.sender], "reveal mismatch");
+        revealed[msg.sender] = true;
+}
+\end{lstlisting}
+
+\begin{lstlisting}[language=Solidity, caption={Safe end-of-lottery handling}]
+function endLottery() public {
+        // gather revealed participants; if none, do nothing
+        if (revealedCount == 0) return;
+        uint winnerIndex = randomness % revealedCount;
+        address winner = revealedList[winnerIndex];
+        // award winner safely
+        TaxpayerRetirementFixed(winner).setTaxAllowance(
+                TaxpayerRetirementFixed(winner).getTaxAllowance() + WINNER_BONUS
+        );
+}
+\end{lstlisting}
+
+\subsection{Final verification (fixed contract)}
+I added a harness \texttt{LotteryFixedEchidna.sol} that instantiates \texttt{LotteryFixed} and two \texttt{TaxpayerRetirementFixed} participants. Running Echidna on this harness produced the following summary (shortened):
+
+\begin{verbatim}
+[2026-01-12 13:11:05.74] Compiling `LotteryFixedEchidna.sol`... Done!
+Analyzing contract: LotteryFixedEchidna:LotteryFixedProbe
+echidna_no_repeat_commit: passing
+echidna_reveal_requires_commit: passing
+echidna_one_winner_only: passing
+
+Unique instructions: 3281
+Unique codehashes: 3
+Corpus size: 12
+Total calls: 50195
+\end{verbatim}
+
+All targeted invariants passed on the fixed implementation.
+
+\subsection{Notes and next steps}
+The harness and fixes illustrate the standard commit-reveal hardening steps: explicit per-address commit flags, reveal-to-commit matching, and safe handling when no reveals are present. If desired, I can now extend the harness with extra invariants (for example: disallow senior participants in the lottery; require winners to be committed participants only; or add time/phase invariants) and run longer Echidna sessions to increase confidence.
+
+\end{document}

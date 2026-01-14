@@ -1,0 +1,7 @@
+testMode: property
+testLimit: 50000
+shrinkLimit: 5000
+seqLen: 100
+deployer: "0x30000"
+sender: ["0x10000", "0x20000", "0x30000"]
+cryticArgs: ["--solc-remaps", "@=node_modules/@"]
